@@ -1,5 +1,30 @@
 # drawio-skill — From Text to Professional Diagrams
 
+> [!IMPORTANT]
+> **Experimental fork for dense-routing A/B testing.** This repository is a patched fork of
+> [`Agents365-ai/drawio-skill`](https://github.com/Agents365-ai/drawio-skill), based on upstream revision
+> [`57270820d3cd71cbdf4fb6b2f7091d4fb37bb019`](https://github.com/Agents365-ai/drawio-skill/commit/57270820d3cd71cbdf4fb6b2f7091d4fb37bb019).
+>
+> The patch includes exactly three routing changes:
+>
+> - Preserve explicitly supplied graph-level `ranksep` / `nodesep` through the IR pipeline.
+> - Preserve separate Graphviz routes for parallel edges with the same source and target.
+> - Apply Manhattan endpoint serialization to keep explicit Graphviz routes orthogonal at node attachments.
+>
+> **Local validation:** 252 tests run — **245 passed, 7 skipped, 0 failures**.
+>
+> **A/B installation:** `npx skills add Agents365-ai/drawio-skill -g` installs **upstream**, not this patched fork.
+> To test this version, clone [`Mikhail-Shishenkov/drawio-skill`](https://github.com/Mikhail-Shishenkov/drawio-skill)
+> into a persistent directory:
+>
+> ```bash
+> git clone https://github.com/Mikhail-Shishenkov/drawio-skill.git ~/drawio-skill-ab
+> ```
+>
+> Then link or copy `~/drawio-skill-ab/skills/drawio-skill/` into your agent's skills directory
+> as `drawio-skill`, so `<skills root>/drawio-skill/SKILL.md` exists. Connect the skill subdirectory,
+> not the repository root; move an existing installation aside before replacing it.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Agents365-ai/drawio-skill?style=flat&logo=github)](https://github.com/Agents365-ai/drawio-skill/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/Agents365-ai/drawio-skill?style=flat&logo=github)](https://github.com/Agents365-ai/drawio-skill/network/members)
