@@ -150,7 +150,9 @@ def build_dot(graph):
 
 
 def layout(dot_src):
-    """Run `dot -Tplain`; return (height_in, {id: (xc, yc)}, {(src, dst): [(x, y), ...]}).
+    """Run `dot -Tplain`; return height, node positions, and edge routes.
+
+    First routes use (src, dst); parallel routes use (src, dst, occurrence).
 
     Node coords are inches (bottom-left origin); each edge's value is the list
     of orthogonal control points dot computed for routing, endpoints included.
@@ -165,6 +167,7 @@ def layout(dot_src):
     except subprocess.CalledProcessError as exc:
         sys.exit(f"error: dot failed: {exc.stderr.strip()}")
     height, pos, edges = 0.0, {}, {}
+    edge_counts = {}
     for line in proc.stdout.splitlines():
         tok = shlex.split(line)
         if not tok:
@@ -175,10 +178,92 @@ def layout(dot_src):
             pos[tok[1]] = (float(tok[2]), float(tok[3]))  # node name x y ...
         elif tok[0] == "edge":                            # edge tail head n x1 y1 ... xn yn
             n = int(tok[3])
-            edges[(tok[1], tok[2])] = [
+            pair = (tok[1], tok[2])
+            occurrence = edge_counts.get(pair, 0)
+            edge_counts[pair] = occurrence + 1
+            key = pair if occurrence == 0 else (*pair, occurrence)
+            edges[key] = [
                 (float(tok[4 + 2 * i]), float(tok[5 + 2 * i])) for i in range(n)
             ]
     return height, pos, edges
+
+
+def graph_routes(graph, edge_pts):
+    """Pair input relations with their distinct routes, in pair-local order."""
+    counts = {}
+    for edge in graph.get("edges", []):
+        pair = (edge["source"], edge["target"])
+        occurrence = counts.get(pair, 0)
+        counts[pair] = occurrence + 1
+        key = pair if occurrence == 0 else (*pair, occurrence)
+        yield edge, edge_pts.get(key, [])
+
+
+def clean_route(points):
+    """Remove repeated/collinear Graphviz control points without moving bends."""
+    result = []
+    for point in points:
+        if result and point == result[-1]:
+            continue
+        while len(result) > 1 and (
+            result[-2][0] == result[-1][0] == point[0]
+            or result[-2][1] == result[-1][1] == point[1]
+        ):
+            result.pop()
+        result.append(point)
+    return result
+
+
+def project_endpoint(point, box, style):
+    """Project to an outward-facing side, with at most one exterior elbow."""
+    x, y, w, h = box
+    if w <= 0 or h <= 0:
+        raise ValueError("Manhattan endpoints require positive node dimensions")
+    px, py = point
+    mx, my = min(10, w / 2), min(10, h / 2)
+    ax = x + w / 2 if "cylinder" in style else max(x + mx, min(x + w - mx, px))
+    ay = max(y + my, min(y + h - my, py))
+    choices = []
+    for allowed, pin, elbow in (
+        (py <= y, (ax, y), (ax, py)),
+        (py >= y + h, (ax, y + h), (ax, py)),
+        (px <= x, (x, ay), (px, ay)),
+        (px >= x + w, (x + w, ay), (px, ay)),
+    ):
+        if allowed:
+            choices.append((abs(pin[0] - px) + abs(pin[1] - py), pin, elbow))
+    if not choices:
+        raise ValueError("Graphviz endpoint hint must be outside its node")
+    _, pin, elbow = min(choices, key=lambda c: c[0])
+    return ((pin[0] - x) / w, (pin[1] - y) / h), clean_route([pin, elbow, point])
+
+
+def manhattan_edge(points, source_box, target_box, source_style, target_style, style):
+    """Keep Graphviz corridors; pin endpoints and disable renderer rerouting."""
+    points = clean_route(points)
+    for box, reverse in ((source_box, False), (target_box, True)):
+        x, y, w, h = box
+        while points:
+            px, py = points[-1 if reverse else 0]
+            if not (x < px < x + w and y < py < y + h):
+                break
+            points.pop(-1 if reverse else 0)
+    if not points:
+        raise ValueError("Graphviz route has no exterior endpoint hints")
+    sp, start = project_endpoint(points[0], source_box, source_style)
+    tp, end = project_endpoint(points[-1], target_box, target_style)
+    route = clean_route(start + points[1:-1] + list(reversed(end)))
+    if any(a[0] != b[0] and a[1] != b[1] for a, b in zip(route, route[1:])):
+        raise ValueError("Expected an orthogonal Graphviz corridor")
+    changes = {"edgeStyle": "none", "noEdgeStyle": "1", "rounded": "0", "curved": "0"}
+    for prefix, pin in (("exit", sp), ("entry", tp)):
+        changes.update({prefix + "X": f"{pin[0]:.12g}", prefix + "Y": f"{pin[1]:.12g}",
+                        prefix + "Dx": "0", prefix + "Dy": "0", prefix + "Perimeter": "0"})
+    # Preserve arrowheads, labels, colours and bare style flags.
+    parts = [p for p in style.split(";") if p and not p.startswith(("entry", "exit"))
+             and p.split("=", 1)[0] not in {*changes, "sourcePort", "targetPort"}]
+    parts.extend(f"{k}={v}" for k, v in changes.items())
+    return route, ";".join(parts) + ";"
 
 
 def group_style(stroke):
@@ -191,6 +276,7 @@ def page_cells(graph, height, pos, edge_pts, color=True):
     """The <root> child cells (everything after the two reserved cells) for one
     laid-out graph — reusable by multi-page generators (c4.py)."""
     nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
     # Absolute snapped rect for every placed node.
     rects = {}
     for node in nodes:
@@ -298,13 +384,21 @@ def page_cells(graph, height, pos, edge_pts, color=True):
             cells.append(
                 f'        <mxCell id="{attr(nid)}" value="{attr(node.get("label", nid))}" '
                 + body)
-    for i, edge in enumerate(graph.get("edges", [])):
-        # Drop the first/last points (they sit on the node borders, where
-        # draw.io attaches anyway) and replay the interior bends as waypoints.
-        interior = edge_pts.get((edge["source"], edge["target"]), [])[1:-1]
+    for i, (edge, pts) in enumerate(graph_routes(graph, edge_pts)):
+        # Match the snapped node boxes, then replace floating attachment with
+        # explicit perpendicular pins; keep Graphviz's interior corridors.
+        interior = [(snap(x * 72), snap((height - y) * 72)) for x, y in pts[1:-1]]
+        style = edge.get("style", EDGE_STYLE)
+        if interior:
+            source, target = edge["source"], edge["target"]
+            route, style = manhattan_edge(
+                interior, rects[source], rects[target],
+                by_id[source].get("style", ""), by_id[target].get("style", ""), style,
+            )
+            interior = route[1:-1]
         if interior:
             points = "".join(
-                f'<mxPoint x="{snap(x * 72) + dx}" y="{snap((height - y) * 72) + dy}"/>'
+                f'<mxPoint x="{x + dx:g}" y="{y + dy:g}"/>'
                 for x, y in interior
             )
             geom = (f'<mxGeometry relative="1" as="geometry">'
@@ -313,7 +407,7 @@ def page_cells(graph, height, pos, edge_pts, color=True):
             geom = '<mxGeometry relative="1" as="geometry"/>'
         cells.append(
             f'        <mxCell id="e{i}" value="{attr(edge.get("label", ""))}" '
-            f'style="{attr(edge.get("style", EDGE_STYLE))}" edge="1" parent="1" '
+            f'style="{attr(style)}" edge="1" parent="1" '
             f'source="{attr(edge["source"])}" target="{attr(edge["target"])}">\n'
             f"          {geom}\n"
             f"        </mxCell>"
@@ -358,8 +452,7 @@ def route_score(graph, height, pos, edge_pts):
             xc, yc = pos[node["id"]]
             rects[node["id"]] = (xc * 72 - w / 2, (height - yc) * 72 - h / 2, w, h)
     routes = []
-    for edge in graph.get("edges", []):
-        pts = edge_pts.get((edge["source"], edge["target"]))
+    for edge, pts in graph_routes(graph, edge_pts):
         if pts:
             routes.append(([(x * 72, (height - y) * 72) for x, y in pts],
                            {edge["source"], edge["target"]}))

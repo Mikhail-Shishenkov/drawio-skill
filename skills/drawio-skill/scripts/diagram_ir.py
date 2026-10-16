@@ -208,6 +208,7 @@ def normalize_ir(raw, source_path=None):
         "nodes": nodes,
         "edges": edges,
         "views": copy.deepcopy(raw.get("views") or []),
+        **{k: raw[k] for k in ("ranksep", "nodesep") if k in raw},
     }
 
 
@@ -404,7 +405,8 @@ def ir_to_graph(ir, node_ids=None, prefix="", links=None):
                     "style": e.get("style") or DEFAULT_EDGE_STYLE,
                 }
             )
-    return {"direction": "TB", "nodes": nodes, "edges": edges}
+    return {"direction": "TB", "nodes": nodes, "edges": edges,
+            **{k: ir[k] for k in ("ranksep", "nodesep") if k in ir}}
 
 
 def _load_autolayout():
